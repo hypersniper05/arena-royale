@@ -77,5 +77,6 @@ Current Version: **2.4.0**
 This project is for educational and entertainment purposes.
 
 ---
+i love papi
 
 Made with passion for mobile gaming fans!

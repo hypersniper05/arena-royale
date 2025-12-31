@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo create:*)",
+      "Bash(git remote add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh issue create:*)",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\josiah\\\\Desktop\\\\arena-royale && gh --version\")",
+      "Bash(powershell.exe -Command \"gh --version\")",
+      "Bash(powershell.exe -Command \"cd C:\\\\Users\\\\josiah\\\\Desktop\\\\arena-royale; gh issue create --title ''Refactor: Break up code into manageable parts'' --body ''## Description\nThe entire game is currently in a single HTML file \\(~540KB\\). This needs to be refactored into a more maintainable structure.\n\n## Proposed Changes\n- Separate JavaScript into modular files\n- Extract CSS into dedicated stylesheets\n- Organize code by feature/component\n- Consider using a build tool for bundling\n\n## Benefits\n- Easier to maintain and debug\n- Better collaboration\n- Cleaner code organization\n- Faster development iterations''\")",
+      "Bash(powershell.exe -Command \"cd C:\\\\Users\\\\josiah\\\\Desktop\\\\arena-royale; gh issue create --title ''Feature: Implement PvP multiplayer'' --body ''## Description\nAdd real-time player vs player \\(PvP\\) multiplayer functionality to the game.\n\n## Requirements\n- Real-time matchmaking system\n- WebSocket or similar for live game state sync\n- Player authentication/identification\n- Lag compensation and sync handling\n- Ranked/unranked modes\n\n## Considerations\n- Server infrastructure needed\n- Network latency handling\n- Anti-cheat measures\n- Reconnection logic''\")"
+    ]
+  }
+}
