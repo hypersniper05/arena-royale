@@ -354,7 +354,23 @@ const NET = {
       P.deck = P.decks[serverPlayer.current_deck || 0] || P.deck;
     }
     if (serverPlayer.clan_id) {
-      P.clan = { id: serverPlayer.clan_id };
+      // Fetch full clan data from server
+      try {
+        const clanData = await this.api(`/api/clan/${serverPlayer.clan_id}`);
+        if (clanData.clan) {
+          P.clan = clanData.clan;
+          P.clanId = serverPlayer.clan_id;
+          // Subscribe to clan chat channel
+          if(typeof subscribeToClanChannel==='function')subscribeToClanChannel();
+        }
+      } catch (e) {
+        console.log('Failed to fetch clan data:', e);
+        P.clan = null;
+        P.clanId = null;
+      }
+    } else {
+      P.clan = null;
+      P.clanId = null;
     }
     // Sync admin status from server
     P.admin = serverPlayer.admin === true;
@@ -3722,163 +3738,303 @@ save();updateCards();showNotify('📋 Deck Loaded!\n'+deck.name,'success');
 
 // ===== CLAN SYSTEM =====
 const CLAN_NAMES=['Royal Warriors','Shadow Knights','Dragon Slayers','Elite Force','Storm Riders','Iron Legion','Phoenix Rising','Thunder Gods','Dark Empire','Golden Crown'];
-function createClan(){
-const name=prompt('Enter clan name:',CLAN_NAMES[Math.floor(Math.random()*CLAN_NAMES.length)]);
-if(!name)return;
-P.clan={name,badge:'⚔️',members:[{name:P.name,trophies:P.tr,role:'Leader',donations:0}],warWins:0,warTrophies:0,donationRequests:[]};
-for(let i=0;i<9;i++){
-P.clan.members.push({name:BOT_NAMES[Math.floor(Math.random()*BOT_NAMES.length)],trophies:Math.floor(Math.random()*10000),role:i<2?'Elder':'Member',donations:Math.floor(Math.random()*100),isBot:true});
-}
-save();updateClan();
+const CLAN_BADGES=['⚔️','🛡️','🐉','⚡','🌑','🔥','🐺','👑','🌊','🔮','🗡️','💀','⭐','🏰','🦁'];
+
+async function createClan(){
+  if(!NET.isOnline){showNotify('Must be online to create a clan!','error');return;}
+  if(P.clan){showNotify('You are already in a clan!','error');return;}
+
+  const name=prompt('Enter clan name (3-20 characters):',CLAN_NAMES[Math.floor(Math.random()*CLAN_NAMES.length)]);
+  if(!name)return;
+  if(name.length<3||name.length>20){showNotify('Clan name must be 3-20 characters!','error');return;}
+
+  try{
+    showNotify('Creating clan...','info');
+    const badge=CLAN_BADGES[Math.floor(Math.random()*CLAN_BADGES.length)];
+    const result=await NET.api('/api/clan','POST',{name,badge,type:'open',required_trophies:0});
+    if(result.clan){
+      P.clan=result.clan;
+      P.clanId=result.clan.id;
+      subscribeToClanChannel(); // Subscribe to clan chat
+      save();updateClan();
+      showNotify(`🏰 Clan "${name}" Created!\nYou are the leader!`,'success');
+    }
+  }catch(e){
+    console.error('Failed to create clan:',e);
+    showNotify('Failed to create clan: '+(e.message||'Unknown error'),'error');
+  }
 }
 function joinRandomClan(){showClanBrowser();}
 
-// Clan Browser System
-const BROWSABLE_CLANS=[
-  {name:'Royal Warriors',badge:'⚔️',trophies:45000,members:42,reqTrophies:0,type:'Open'},
-  {name:'Elite Knights',badge:'🛡️',trophies:72000,members:48,reqTrophies:1000,type:'Open'},
-  {name:'Dragon Slayers',badge:'🐉',trophies:125000,members:50,reqTrophies:3000,type:'Invite Only'},
-  {name:'Thunder Legion',badge:'⚡',trophies:89000,members:38,reqTrophies:2000,type:'Open'},
-  {name:'Shadow Empire',badge:'🌑',trophies:156000,members:47,reqTrophies:5000,type:'Open'},
-  {name:'Phoenix Rising',badge:'🔥',trophies:201000,members:49,reqTrophies:7500,type:'Invite Only'},
-  {name:'Arctic Wolves',badge:'🐺',trophies:67000,members:35,reqTrophies:1500,type:'Open'},
-  {name:'Golden Titans',badge:'👑',trophies:312000,members:50,reqTrophies:10000,type:'Closed'},
-  {name:'Storm Raiders',badge:'🌊',trophies:54000,members:29,reqTrophies:500,type:'Open'},
-  {name:'Mystic Order',badge:'🔮',trophies:98000,members:44,reqTrophies:2500,type:'Open'},
-  {name:'Iron Legion',badge:'🗡️',trophies:78000,members:41,reqTrophies:1800,type:'Open'},
-  {name:'Chaos Knights',badge:'💀',trophies:145000,members:46,reqTrophies:4000,type:'Invite Only'},
-  {name:'Star Alliance',badge:'⭐',trophies:234000,members:48,reqTrophies:8000,type:'Open'},
-  {name:'Newbie Haven',badge:'🐣',trophies:12000,members:18,reqTrophies:0,type:'Open'},
-  {name:'Casual Kings',badge:'🎮',trophies:34000,members:25,reqTrophies:0,type:'Open'}
-];
+// Clan Browser System - Now fetches from API
+let cachedClans=[];
 
-function showClanBrowser(){
+async function showClanBrowser(){
+  if(P.clan){showNotify('You are already in a clan! Leave first.','error');return;}
+
   const modal=document.createElement('div');
   modal.className='confirm-modal';
   modal.id='clanBrowserModal';
   modal.style.overflowY='auto';
 
-  const sortedClans=[...BROWSABLE_CLANS].sort((a,b)=>b.trophies-a.trophies);
-  const availableClans=sortedClans.filter(c=>c.type!=='Closed'&&c.members<50);
-
-  let clansHtml=availableClans.map(clan=>{
-    const canJoin=P.tr>=clan.reqTrophies&&clan.type==='Open';
-    const needsInvite=clan.type==='Invite Only';
-    return `<div style="background:linear-gradient(145deg,#1b2838,#243447);border:2px solid ${canJoin?'#27ae60':needsInvite?'#f39c12':'#e74c3c'};border-radius:10px;padding:12px;margin-bottom:8px">
-      <div style="display:flex;align-items:center;gap:10px">
-        <div style="font-size:28px">${clan.badge}</div>
-        <div style="flex:1">
-          <div style="font-weight:900;font-size:13px;color:#fff">${clan.name}</div>
-          <div style="font-size:10px;color:#888">🏆 ${clan.trophies.toLocaleString()} | 👥 ${clan.members}/50</div>
-          <div style="font-size:9px;color:${canJoin?'#27ae60':needsInvite?'#f39c12':'#e74c3c'}">${clan.type} ${clan.reqTrophies>0?`• Required: ${clan.reqTrophies} 🏆`:''}</div>
-        </div>
-        <button onclick="joinSpecificClan('${clan.name}','${clan.badge}',${clan.trophies},${clan.members})"
-          style="padding:8px 12px;background:linear-gradient(180deg,${canJoin?'#27ae60,#1e8449':needsInvite?'#f39c12,#d68910':'#95a5a6,#7f8c8d'});border:none;border-radius:8px;color:#fff;font-weight:800;font-size:10px;cursor:${canJoin||needsInvite?'pointer':'not-allowed'}"
-          ${!canJoin&&!needsInvite?'disabled':''}>${canJoin?'JOIN':needsInvite?'REQUEST':'🔒'}</button>
-      </div>
-    </div>`;
-  }).join('');
-
+  // Show loading state first
   modal.innerHTML=`<div style="background:linear-gradient(145deg,#0d1b2a,#1b2838);border:3px solid #3498db;border-radius:16px;padding:20px;max-width:380px;width:100%;max-height:80vh;overflow-y:auto">
     <div style="text-align:center;margin-bottom:15px">
       <div style="font-family:'Lilita One',cursive;font-size:22px;color:#3498db">🔍 FIND A CLAN</div>
       <div style="font-size:10px;color:#888">Your Trophies: 🏆 ${P.tr.toLocaleString()}</div>
     </div>
-    <div style="margin-bottom:10px;padding:8px;background:#1a2535;border-radius:8px">
-      <input type="text" id="clanSearchInput" placeholder="Search clans..." onkeyup="filterClans()" style="width:100%;padding:8px;border:none;background:transparent;color:#fff;font-size:12px">
-    </div>
-    <div id="clanListContainer">${clansHtml}</div>
+    <div style="text-align:center;padding:40px;color:#888">Loading clans...</div>
     <button onclick="closeClanBrowser()" style="width:100%;padding:12px;background:linear-gradient(180deg,#555,#333);border:none;border-radius:10px;color:#fff;font-weight:800;font-size:14px;cursor:pointer;margin-top:10px">Close</button>
   </div>`;
   document.body.appendChild(modal);
+
+  // Fetch clans from API
+  try{
+    if(NET.isOnline){
+      const result=await NET.api('/api/clans?trophies='+P.tr);
+      cachedClans=result.clans||[];
+    }
+  }catch(e){
+    console.error('Failed to fetch clans:',e);
+  }
+
+  // If no clans from API, show message to create
+  if(cachedClans.length===0){
+    document.getElementById('clanListContainer')?.remove();
+    const container=modal.querySelector('div>div:last-of-type');
+    if(container){
+      container.outerHTML=`<div id="clanListContainer" style="text-align:center;padding:20px;color:#888">
+        <div style="font-size:40px;margin-bottom:10px">🏰</div>
+        <div>No clans found!</div>
+        <div style="font-size:11px;margin-top:5px">Be the first to create a clan!</div>
+        <button onclick="closeClanBrowser();createClan()" style="margin-top:15px;padding:10px 20px;background:linear-gradient(180deg,#27ae60,#1e8449);border:none;border-radius:8px;color:#fff;font-weight:800;cursor:pointer">Create Clan</button>
+      </div>`;
+    }
+    return;
+  }
+
+  renderClanBrowser();
+}
+
+function renderClanBrowser(searchQuery=''){
+  const modal=document.getElementById('clanBrowserModal');
+  if(!modal)return;
+
+  let clansToShow=cachedClans||[];
+  if(searchQuery){
+    const q=searchQuery.toLowerCase();
+    clansToShow=clansToShow.filter(c=>c.name.toLowerCase().includes(q));
+  }
+
+  // Sort by members (most active first)
+  clansToShow.sort((a,b)=>(b.members||0)-(a.members||0));
+
+  let clansHtml='';
+  if(clansToShow.length===0){
+    clansHtml=`<div style="text-align:center;padding:20px;color:#888">No clans match your search</div>`;
+  }else{
+    clansHtml=clansToShow.map(clan=>{
+      const typeLabel=clan.type==='open'?'Open':clan.type==='invite_only'?'Invite Only':'Closed';
+      const canJoin=P.tr>=(clan.required_trophies||0)&&clan.type==='open'&&(clan.members||0)<50;
+      const needsInvite=clan.type==='invite_only'&&(clan.members||0)<50;
+      const isFull=(clan.members||0)>=50;
+      const isClosed=clan.type==='closed';
+
+      return `<div style="background:linear-gradient(145deg,#1b2838,#243447);border:2px solid ${canJoin?'#27ae60':needsInvite?'#f39c12':'#e74c3c'};border-radius:10px;padding:12px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="font-size:28px">${clan.badge||'🏰'}</div>
+          <div style="flex:1">
+            <div style="font-weight:900;font-size:13px;color:#fff">${clan.name}</div>
+            <div style="font-size:10px;color:#888">🏆 ${(clan.war_trophies||0).toLocaleString()} | 👥 ${clan.members||0}/${clan.max_members||50}</div>
+            <div style="font-size:9px;color:${canJoin?'#27ae60':needsInvite?'#f39c12':'#e74c3c'}">${typeLabel} ${(clan.required_trophies||0)>0?`• Required: ${clan.required_trophies} 🏆`:''}</div>
+          </div>
+          <button onclick="joinClanById('${clan.id}')"
+            style="padding:8px 12px;background:linear-gradient(180deg,${canJoin?'#27ae60,#1e8449':needsInvite?'#f39c12,#d68910':'#95a5a6,#7f8c8d'});border:none;border-radius:8px;color:#fff;font-weight:800;font-size:10px;cursor:${canJoin||needsInvite?'pointer':'not-allowed'}"
+            ${isFull||isClosed?'disabled':''}>${isFull?'FULL':isClosed?'🔒':canJoin?'JOIN':'REQUEST'}</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  modal.querySelector('div').innerHTML=`
+    <div style="text-align:center;margin-bottom:15px">
+      <div style="font-family:'Lilita One',cursive;font-size:22px;color:#3498db">🔍 FIND A CLAN</div>
+      <div style="font-size:10px;color:#888">Your Trophies: 🏆 ${P.tr.toLocaleString()}</div>
+    </div>
+    <div style="margin-bottom:10px;padding:8px;background:#1a2535;border-radius:8px">
+      <input type="text" id="clanSearchInput" placeholder="Search clans..." oninput="filterClans()" value="${searchQuery}" style="width:100%;padding:8px;border:none;background:transparent;color:#fff;font-size:12px">
+    </div>
+    <div id="clanListContainer" style="max-height:300px;overflow-y:auto">${clansHtml}</div>
+    <button onclick="closeClanBrowser()" style="width:100%;padding:12px;background:linear-gradient(180deg,#555,#333);border:none;border-radius:10px;color:#fff;font-weight:800;font-size:14px;cursor:pointer;margin-top:10px">Close</button>`;
+}
+
+function filterClans(){
+  const input=document.getElementById('clanSearchInput');
+  if(input)renderClanBrowser(input.value);
 }
 
 function closeClanBrowser(){document.getElementById('clanBrowserModal')?.remove();}
 
-function joinSpecificClan(name,badge,trophies,memberCount){
-  const clan=BROWSABLE_CLANS.find(c=>c.name===name);
-  if(!clan)return;
+// Join clan by ID using API
+async function joinClanById(clanId){
+  if(!NET.isOnline){showNotify('Must be online to join a clan!','error');return;}
+  if(P.clan){showNotify('You are already in a clan!','error');return;}
 
-  if(clan.type==='Invite Only'){
+  const clan=cachedClans.find(c=>c.id===clanId);
+  if(!clan){showNotify('Clan not found!','error');return;}
+
+  // Check if invite-only
+  if(clan.type==='invite'){
     showNotify('📨 Join Request Sent!\nWaiting for clan leader approval...','info');
-    setTimeout(()=>{
-      if(Math.random()<0.7){
-        actuallyJoinClan(name,badge,trophies,memberCount);
-        showNotify('✅ Request Accepted!\nWelcome to '+name+'!','success');
-      }else{
-        showNotify('❌ Request Declined\nTry another clan!','error');
+    // For now, simulate invite system (future: implement proper invite API)
+    setTimeout(async()=>{
+      try{
+        const result=await NET.api(`/api/clan/${clanId}/join`,'POST');
+        if(result.clan){
+          P.clan=result.clan;
+          P.clanId=clanId;
+          subscribeToClanChannel(); // Subscribe to clan chat
+          save();updateClan();
+          closeClanBrowser();
+          showNotify('✅ Request Accepted!\nWelcome to '+clan.name+'!','success');
+        }
+      }catch(e){
+        showNotify('❌ Request Declined: '+(e.message||'Try another clan!'),'error');
       }
-    },2000);
+    },1500);
     return;
   }
 
-  if(P.tr<clan.reqTrophies){
-    showNotify(`Need ${clan.reqTrophies} trophies to join!`,'error');
+  // Direct join for open clans
+  try{
+    showNotify('Joining clan...','info');
+    const result=await NET.api(`/api/clan/${clanId}/join`,'POST');
+    if(result.clan){
+      P.clan=result.clan;
+      P.clanId=clanId;
+      subscribeToClanChannel(); // Subscribe to clan chat
+      save();updateClan();
+      closeClanBrowser();
+      showNotify(`🏰 Joined ${clan.name}!\nWelcome to the clan!`,'success');
+    }
+  }catch(e){
+    console.error('Failed to join clan:',e);
+    showNotify('Failed to join clan: '+(e.message||'Unknown error'),'error');
+  }
+}
+
+// Legacy function for backwards compatibility
+function joinSpecificClan(name,badge,trophies,memberCount){
+  const clan=cachedClans.find(c=>c.name===name);
+  if(clan){
+    joinClanById(clan.id);
+  }else{
+    showNotify('Clan not found!','error');
+  }
+}
+
+// Leave clan using API
+async function leaveClan(){
+  if(!P.clan){showNotify('You are not in a clan!','error');return;}
+  if(!NET.isOnline){showNotify('Must be online to leave a clan!','error');return;}
+
+  const clanId=P.clan.id||P.clanId;
+  if(!clanId){
+    // Fallback for local-only clan
+    P.clan=null;
+    P.clanId=null;
+    save();updateClan();
+    showNotify('Left the clan!','info');
     return;
   }
 
-  actuallyJoinClan(name,badge,trophies,memberCount);
-  closeClanBrowser();
-}
-
-function generateRealisticMemberStats(role,clanAvgTrophies,memberIndex){
-  // Higher roles = higher trophies on average
-  const roleMultipliers={Leader:1.4,'Co-Leader':1.2,Elder:1.0,Member:0.8};
-  const mult=roleMultipliers[role]||0.8;
-  // Base trophies with variance, influenced by clan strength and role
-  const baseTrophies=Math.floor(clanAvgTrophies*mult*(0.7+Math.random()*0.6));
-  const trophies=Math.max(500,Math.min(9000,baseTrophies+Math.floor(Math.random()*2000-1000)));
-  // Max trophies slightly higher than current
-  const maxTrophies=trophies+Math.floor(Math.random()*500)+50;
-  // Calculate wins/losses based on trophies (roughly 30 trophies per net win at higher levels)
-  const totalGames=Math.floor(trophies/15)+Math.floor(Math.random()*200)+50;
-  const winRate=0.45+Math.random()*0.2; // 45-65% win rate
-  const wins=Math.floor(totalGames*winRate);
-  const losses=totalGames-wins;
-  // Crowns: ~3 per match average
-  const crowns=Math.floor(totalGames*2.5+Math.random()*100);
-  // Donations based on role and activity (leaders donate more)
-  const donationMultiplier={Leader:2.5,'Co-Leader':2.0,Elder:1.5,Member:1.0}[role]||1;
-  const donations=Math.floor((Math.random()*150+50)*donationMultiplier);
-  // Last active: more recent for higher roles
-  const hoursAgo=role==='Leader'?Math.random()*2:role==='Co-Leader'?Math.random()*12:role==='Elder'?Math.random()*24:Math.random()*72;
-  const lastActive=Date.now()-hoursAgo*3600000;
-  // Current streak and max streak
-  const maxStreak=Math.floor(Math.random()*15)+3;
-  const currentStreak=Math.random()<0.4?Math.floor(Math.random()*maxStreak):0;
-  return {trophies,maxTrophies,wins,losses,crowns,donations,lastActive,maxStreak,currentStreak};
-}
-
-function actuallyJoinClan(name,badge,trophies,memberCount){
-  const clanAvgTrophies=Math.floor(trophies/memberCount); // Estimate avg per member
-  P.clan={name,badge,members:[],warWins:Math.floor(Math.random()*50)+10,warTrophies:trophies,donationRequests:[],chatHistory:[],level:Math.floor(Math.random()*10)+1};
-  const usedNames=new Set();
-  for(let i=0;i<memberCount;i++){
-    const role=i===0?'Leader':i<3?'Co-Leader':i<6?'Elder':'Member';
-    let memberName;
-    do{memberName=BOT_NAMES[Math.floor(Math.random()*BOT_NAMES.length)];}while(usedNames.has(memberName));
-    usedNames.add(memberName);
-    const stats=generateRealisticMemberStats(role,clanAvgTrophies,i);
-    P.clan.members.push({
-      name:memberName,
-      trophies:stats.trophies,
-      maxTrophies:stats.maxTrophies,
-      wins:stats.wins,
-      losses:stats.losses,
-      crowns:stats.crowns,
-      role,
-      donations:stats.donations,
-      lastActive:stats.lastActive,
-      maxStreak:stats.maxStreak,
-      currentStreak:stats.currentStreak,
-      isBot:true
-    });
+  // Check if player is leader
+  const myMember=P.clan.members?.find(m=>m.player_id===NET.playerId||m.name===P.name);
+  if(myMember?.role==='leader'&&P.clan.members?.length>1){
+    showNotify('You must transfer leadership before leaving!','error');
+    return;
   }
-  P.clan.members.push({name:P.name,trophies:P.tr,maxTrophies:Math.max(P.tr,P.highestTr||P.tr),wins:P.stats?.wins||0,losses:P.stats?.losses||0,crowns:P.stats?.crowns||0,role:'Member',donations:0,lastActive:Date.now(),isBot:false});
-  save();updateClan();
-  showNotify(`🏰 Joined ${name}!\nWelcome to the clan!`,'success');
+
+  try{
+    showNotify('Leaving clan...','info');
+    unsubscribeFromClanChannel(clanId); // Unsubscribe from clan chat
+    const result=await NET.api(`/api/clan/${clanId}/leave`,'POST');
+    if(result.success){
+      P.clan=null;
+      P.clanId=null;
+      save();updateClan();
+      showNotify('Left the clan!','info');
+    }
+  }catch(e){
+    console.error('Failed to leave clan:',e);
+    showNotify('Failed to leave clan: '+(e.message||'Unknown error'),'error');
+  }
 }
-function leaveClan(){P.clan=null;save();updateClan();}
+
+// Delete clan (leader only)
+async function deleteClan(){
+  if(!P.clan){showNotify('You are not in a clan!','error');return;}
+  if(!NET.isOnline){showNotify('Must be online to delete a clan!','error');return;}
+
+  const clanId=P.clan.id||P.clanId;
+  if(!clanId){showNotify('Cannot delete local clan','error');return;}
+
+  // Check if player is leader
+  const myMember=P.clan.members?.find(m=>m.player_id===NET.playerId||m.name===P.name);
+  if(myMember?.role!=='leader'){
+    showNotify('Only the clan leader can delete the clan!','error');
+    return;
+  }
+
+  if(!confirm('Are you sure you want to DELETE this clan? This cannot be undone!')){
+    return;
+  }
+
+  try{
+    showNotify('Deleting clan...','info');
+    unsubscribeFromClanChannel(clanId);
+    // For now, leader leaving with only 1 member deletes the clan
+    const result=await NET.api(`/api/clan/${clanId}/leave`,'POST');
+    if(result.success||result.deleted){
+      P.clan=null;
+      P.clanId=null;
+      save();updateClan();
+      showNotify('Clan deleted!','success');
+    }
+  }catch(e){
+    console.error('Failed to delete clan:',e);
+    showNotify('Failed to delete clan: '+(e.message||'Unknown error'),'error');
+  }
+}
+
+// ===== REAL-TIME CLAN UPDATES =====
+let clanPollingInterval=null;
+
+function startClanPolling(){
+  if(clanPollingInterval)return;
+  clanPollingInterval=setInterval(async()=>{
+    if(!NET.isOnline||!P.clan?.id)return;
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}`);
+      if(result.clan){
+        // Preserve local chat history
+        const localChat=P.clan.chatHistory||[];
+        P.clan=result.clan;
+        // Merge chat histories
+        if(!P.clan.chatHistory)P.clan.chatHistory=[];
+        P.clan.chatHistory=[...P.clan.chat_history||[],...localChat.filter(m=>!P.clan.chat_history?.some(s=>s.message===m.msg&&s.sender_name===m.sender))];
+        updateClan();
+      }
+    }catch(e){}
+  },10000); // Poll every 10 seconds
+}
+
+function stopClanPolling(){
+  if(clanPollingInterval){
+    clearInterval(clanPollingInterval);
+    clanPollingInterval=null;
+  }
+}
 
 // ===== AI JOIN REQUESTS SYSTEM =====
 function generateJoinRequests(){
@@ -3969,121 +4125,349 @@ function challengeMember(name){hideMemberPopup();showNotify(`⚔️ Challenged $
 function visitMember(name){hideMemberPopup();const member=P.clan?.members.find(m=>m.name===name);if(!member)return;const winRate=member.wins&&member.losses?Math.round(member.wins/(member.wins+member.losses)*100):50;showNotify(`👁️ ${name}'s Profile\n🏆 ${member.trophies.toLocaleString()} (Best: ${(member.maxTrophies||member.trophies).toLocaleString()})\n📊 ${winRate}% Win Rate (${member.wins||0}W/${member.losses||0}L)\n👑 ${(member.crowns||0).toLocaleString()} Crowns | 🎁 ${member.donations||0} Donated`,'info');}
 setInterval(()=>{if(P.clan)updateJoinRequests();},20000);
 
+// Helper to normalize role display (API uses lowercase, display uses Title Case)
+function normalizeRole(role){
+  if(!role)return 'Member';
+  const r=role.toLowerCase();
+  if(r==='leader')return 'Leader';
+  if(r==='co-leader')return 'Co-Leader';
+  if(r==='elder')return 'Elder';
+  return 'Member';
+}
+function getRoleIcon(role){
+  const r=(role||'').toLowerCase();
+  if(r==='leader')return '👑';
+  if(r==='co-leader')return '⭐';
+  if(r==='elder')return '🛡️';
+  return '👤';
+}
+function isLeaderRole(role){
+  return (role||'').toLowerCase()==='leader';
+}
+
 function updateClan(){
-const noClan=document.getElementById('noClan'),inClan=document.getElementById('inClan');
-if(!P.clan){noClan.style.display='block';inClan.style.display='none';return;}
-noClan.style.display='none';inClan.style.display='block';
-document.getElementById('clanInfo').innerHTML=`<div class="clan-header"><div class="clan-badge">${P.clan.badge}</div><div><div class="clan-name">${P.clan.name}</div><div class="clan-stats"><span>👥 ${P.clan.members.length}/50</span><span>🏆 ${P.clan.warTrophies}</span><span>⚔️ ${P.clan.warWins} Wars</span></div></div></div>`;
-memberPopupData=P.clan.members.sort((a,b)=>b.trophies-a.trophies).slice(0,10);
-document.getElementById('clanMembers').innerHTML=memberPopupData.map((m,i)=>`<div class="clan-member${m.role==='Leader'?' leader':''}" onclick="showMemberPopup(${i},event)" style="cursor:pointer"><div style="font-size:20px">${m.role==='Leader'?'👑':m.role==='Co-Leader'?'⭐':m.role==='Elder'?'🛡️':'👤'}</div><div style="flex:1"><div style="font-weight:800;font-size:11px">${m.name}${m.name===P.name?' (You)':''}</div><div class="role">${m.role}</div></div><div style="text-align:right"><div style="font-size:11px;color:var(--gold)">🏆 ${m.trophies}</div><div style="font-size:9px;color:#6b7c8a">🎁 ${m.donations}</div></div></div>`).join('');
-document.getElementById('clanWar').innerHTML=`<div style="text-align:center;padding:15px"><div style="font-size:30px">⚔️</div><div style="font-weight:800;margin:5px 0">Clan War Available!</div><button onclick="startClanWar()" style="padding:8px 16px;background:linear-gradient(180deg,var(--gold),var(--gold-dark));border:none;border-radius:8px;color:#fff;font-weight:800;cursor:pointer">Start War</button></div>`;
-updateJoinRequests();updateClanChat();updateDonations();updateClanLevel();updateClanGames();updateClanChest();updateClanPerks();updateClanLeague();updateClanMail();updateClanSettings();
+  const noClan=document.getElementById('noClan'),inClan=document.getElementById('inClan');
+  if(!P.clan){
+    noClan.style.display='block';
+    inClan.style.display='none';
+    stopClanPolling();
+    return;
+  }
+  noClan.style.display='none';
+  inClan.style.display='block';
+  // Start real-time updates
+  if(P.clan.id)startClanPolling();
+
+  // Support both API format (stats.war_trophies) and local format (warTrophies)
+  const warTrophies=P.clan.stats?.war_trophies||P.clan.warTrophies||0;
+  const warWins=P.clan.stats?.war_wins||P.clan.warWins||0;
+  const members=P.clan.members||[];
+
+  document.getElementById('clanInfo').innerHTML=`<div class="clan-header"><div class="clan-badge">${P.clan.badge||'🏰'}</div><div><div class="clan-name">${P.clan.name}</div><div class="clan-stats"><span>👥 ${members.length}/50</span><span>🏆 ${warTrophies}</span><span>⚔️ ${warWins} Wars</span></div></div></div>`;
+
+  // Sort by trophies (handle both trophies field and stats.trophies from player data)
+  const sortedMembers=[...members].sort((a,b)=>(b.trophies||0)-(a.trophies||0));
+  memberPopupData=sortedMembers.slice(0,10);
+
+  document.getElementById('clanMembers').innerHTML=memberPopupData.map((m,i)=>{
+    const displayName=m.name||'Unknown';
+    const isMe=m.player_id===NET.playerId||m.name===P.name;
+    const role=normalizeRole(m.role);
+    const trophies=m.trophies||0;
+    const donations=m.donations||0;
+    return `<div class="clan-member${isLeaderRole(m.role)?' leader':''}" onclick="showMemberPopup(${i},event)" style="cursor:pointer"><div style="font-size:20px">${getRoleIcon(m.role)}</div><div style="flex:1"><div style="font-weight:800;font-size:11px">${displayName}${isMe?' (You)':''}</div><div class="role">${role}</div></div><div style="text-align:right"><div style="font-size:11px;color:var(--gold)">🏆 ${trophies}</div><div style="font-size:9px;color:#6b7c8a">🎁 ${donations}</div></div></div>`;
+  }).join('');
+
+  document.getElementById('clanWar').innerHTML=`<div style="text-align:center;padding:15px"><div style="font-size:30px">⚔️</div><div style="font-weight:800;margin:5px 0">Clan War Available!</div><button onclick="startClanWar()" style="padding:8px 16px;background:linear-gradient(180deg,var(--gold),var(--gold-dark));border:none;border-radius:8px;color:#fff;font-weight:800;cursor:pointer">Start War</button></div>`;
+  updateJoinRequests();updateClanChat();updateDonations();updateClanLevel();updateClanGames();updateClanChest();updateClanPerks();updateClanLeague();updateClanMail();updateClanSettings();
 }
 function startClanWar(){showNotify('⚔️ Clan War Started!\nWin battles to earn war trophies!','epic');P.clan.warWins++;P.clan.warTrophies+=Math.floor(Math.random()*100)+50;save();updateClan();}
 
 // ===== CLAN CHAT & FEATURES =====
+// Subscribe to clan channel when joining/loading clan
+function subscribeToClanChannel(){
+  if(P.clan&&P.clan.id&&NET.isOnline){
+    NET.send('subscribe',{channel:`clan:${P.clan.id}`});
+  }
+}
+function unsubscribeFromClanChannel(clanId){
+  if(clanId&&NET.isOnline){
+    NET.send('unsubscribe',{channel:`clan:${clanId}`});
+  }
+}
+
 function sendClanChat(){
-const input=document.getElementById('chatInput');
-const msg=input.value.trim();
-if(!msg||!P.clan)return;
-if(!P.clan.chatHistory)P.clan.chatHistory=[];
-P.clan.chatHistory.push({sender:P.name,msg,time:Date.now()});
-if(P.clan.chatHistory.length>50)P.clan.chatHistory.shift();
-input.value='';
-setTimeout(()=>{
-const botMember=P.clan.members.find(m=>m.isBot);
-if(botMember){
-const ml=msg.toLowerCase();
-let reply;
-if(ml.includes('hey')||ml.includes('hi')||ml.includes('hello')||ml.includes('sup')||ml.includes('yo'))reply=['Hey! 👋','What\'s up!','Hey there!','Yo!','Hello!'][Math.floor(Math.random()*5)];
-else if(ml.includes('how')&&(ml.includes('clan')||ml.includes('going')||ml.includes('everyone')||ml.includes('you')))reply=['Pretty good! Someone was BMing me earlier tho 😤','Good! Just grinding trophies','Not bad, won a few matches today','Doing well! Ready for war?','Great! Just got a legendary from a chest 🔥'][Math.floor(Math.random()*5)];
-else if(ml.includes('gg')||ml.includes('good game'))reply=['GG! 🤝','Good game!','That was close!','GG WP!','Nice match!'][Math.floor(Math.random()*5)];
-else if(ml.includes('battle')||ml.includes('1v1')||ml.includes('fight')||ml.includes('friendly'))reply=['I\'m down! Let\'s go 🔥','Sure, just finished a match','Ready when you are!','Let\'s do it!','Bring it on 💪'][Math.floor(Math.random()*5)];
-else if(ml.includes('bm')||ml.includes('toxic')||ml.includes('emote')||ml.includes('spam'))reply=['Hate when people do that 😤','Just mute them lol','Some people are so toxic','I always laugh emote back 😂','That\'s so annoying fr'][Math.floor(Math.random()*5)];
-else if(ml.includes('win')||ml.includes('won'))reply=['Nice! 🏆','Let\'s gooo!','Congrats!','W!','Keep it up!'][Math.floor(Math.random()*5)];
-else if(ml.includes('lose')||ml.includes('lost')||ml.includes('L'))reply=['Tough luck man','It happens to the best of us','You\'ll get em next time!','Unlucky 😔','Keep grinding!'][Math.floor(Math.random()*5)];
-else if(ml.includes('trophy')||ml.includes('trophies')||ml.includes('push'))reply=['What trophy range?','I\'m stuck at 6k rn','Trophy pushing is so stressful','Good luck on the grind!','I dropped 200 trophies yesterday 😭'][Math.floor(Math.random()*5)];
-else if(ml.includes('card')||ml.includes('deck')||ml.includes('upgrade'))reply=['What deck you running?','I need more gold for upgrades','Just maxed my Hog!','Save for legendaries','Cards are so expensive to upgrade'][Math.floor(Math.random()*5)];
-else if(ml.includes('war')||ml.includes('clan war'))reply=['War day tomorrow!','Let\'s get those wins','Don\'t forget to attack!','We need more participants','War is the best for gold'][Math.floor(Math.random()*5)];
-else if(ml.includes('chest')||ml.includes('legendary')||ml.includes('epic'))reply=['Lucky! What\'d you get?','I never get anything good 😭','Nice pull!','Still waiting for my legendary...','Chest luck is wild'][Math.floor(Math.random()*5)];
-else if(ml.includes('thanks')||ml.includes('thx')||ml.includes('ty'))reply=['No problem!','Anytime! 👍','You got it!','Sure thing!','🤝'][Math.floor(Math.random()*5)];
-else if(ml.includes('bye')||ml.includes('later')||ml.includes('gtg')||ml.includes('gn'))reply=['See ya!','Later! 👋','Peace!','Catch you later!','GN!'][Math.floor(Math.random()*5)];
-else if(ml.includes('?'))reply=['Good question','Not sure tbh','I think so?','Maybe!','Hard to say'][Math.floor(Math.random()*5)];
-else reply=['Nice!','👍','True','For real','Lol','Facts','🔥','Yep','Same','I feel that'][Math.floor(Math.random()*10)];
-P.clan.chatHistory.push({sender:botMember.name,msg:reply,time:Date.now()});
-save();updateClanChat();
+  const input=document.getElementById('chatInput');
+  const msg=input.value.trim();
+  if(!msg||!P.clan)return;
+  if(msg.length>200){showNotify('Message too long! (max 200 characters)','error');return;}
+
+  input.value='';
+
+  // Always show message immediately (optimistic update)
+  if(!P.clan.chatHistory)P.clan.chatHistory=[];
+  P.clan.chatHistory.push({sender:P.name,msg,time:Date.now()});
+  if(P.clan.chatHistory.length>100)P.clan.chatHistory.shift();
+  updateClanChat();
+
+  // Also send via WebSocket if online
+  if(NET.isOnline&&P.clan.id){
+    NET.send('chat_send',{
+      channel:'clan',
+      message:msg,
+      clan_id:P.clan.id
+    });
+  }
+  save();
 }
-},1000+Math.random()*2000);
-save();updateClanChat();
-}
+
 function updateClanChat(){
-const chat=document.getElementById('clanChat');
-if(!chat||!P.clan)return;
-const history=P.clan.chatHistory||[];
-chat.innerHTML=history.length===0?'<div style="color:#6b7c8a;font-size:10px;text-align:center">No messages yet. Start the conversation!</div>':
-history.slice(-20).map(m=>`<div style="margin-bottom:6px;padding:4px 8px;background:${m.sender===P.name?'#2d4a3e':'#243447'};border-radius:6px"><div style="font-size:9px;color:${m.sender===P.name?'#4ade80':'#6b9dc8'};font-weight:700">${m.sender}</div><div style="font-size:11px;color:#fff">${m.msg}</div></div>`).join('');
-chat.scrollTop=chat.scrollHeight;
+  const chat=document.getElementById('clanChat');
+  if(!chat||!P.clan)return;
+
+  // Support both API format (chat_history) and local format (chatHistory)
+  const history=P.clan.chat_history||P.clan.chatHistory||[];
+
+  if(history.length===0){
+    chat.innerHTML='<div style="color:#6b7c8a;font-size:10px;text-align:center">No messages yet. Start the conversation!</div>';
+    return;
+  }
+
+  chat.innerHTML=history.slice(-20).map(m=>{
+    // Support both formats: API uses sender_name/message, local uses sender/msg
+    const sender=m.sender_name||m.sender||'Unknown';
+    const message=m.message||m.msg||'';
+    const isMe=sender===P.name;
+    return `<div style="margin-bottom:6px;padding:4px 8px;background:${isMe?'#2d4a3e':'#243447'};border-radius:6px"><div style="font-size:9px;color:${isMe?'#4ade80':'#6b9dc8'};font-weight:700">${sender}</div><div style="font-size:11px;color:#fff">${message}</div></div>`;
+  }).join('');
+  chat.scrollTop=chat.scrollHeight;
 }
-function requestDonation(){
-if(!P.clan)return;
-const cards=CARDS.filter(c=>c.rarity==='Common'||c.rarity==='Rare');
-const card=cards[Math.floor(Math.random()*cards.length)];
-if(!P.clan.donationRequests)P.clan.donationRequests=[];
-P.clan.donationRequests.unshift({requester:P.name,cardId:card.id,cardName:card.n,amount:0,max:card.rarity==='Common'?40:10,time:Date.now()});
-if(P.clan.donationRequests.length>10)P.clan.donationRequests.pop();
-setTimeout(()=>{
-const req=P.clan.donationRequests.find(r=>r.requester===P.name&&r.amount<r.max);
-if(req){
-const donated=Math.min(req.max-req.amount,Math.floor(Math.random()*5)+1);
-req.amount+=donated;
-const pc=P.cards.find(c=>c.id===req.cardId);
-if(pc)pc.shards+=donated;else P.cards.push({id:req.cardId,lv:1,shards:donated});
-save();updateDonations();
-}
-},2000);
-save();updateDonations();
-showNotify(`📨 Card Requested!\n${card.n}`,'success');
+async function requestDonation(){
+  if(!P.clan)return;
+  const cards=CARDS.filter(c=>c.rarity==='Common'||c.rarity==='Rare');
+  const card=cards[Math.floor(Math.random()*cards.length)];
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/request`,'POST',{card_id:card.id});
+      if(result.request){
+        if(!P.clan.donation_requests)P.clan.donation_requests=[];
+        P.clan.donation_requests.unshift(result.request);
+        updateDonations();
+        showNotify(`📨 Card Requested!\n${card.n}`,'success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to request cards','error');
+    }
+  }else{
+    // Offline fallback
+    if(!P.clan.donationRequests)P.clan.donationRequests=[];
+    P.clan.donationRequests.unshift({requester:P.name,cardId:card.id,cardName:card.n,amount:0,max:card.rarity==='Common'?40:10,time:Date.now()});
+    if(P.clan.donationRequests.length>10)P.clan.donationRequests.pop();
+    save();updateDonations();
+    showNotify(`📨 Card Requested!\n${card.n}`,'success');
+  }
 }
 function updateDonations(){
-const el=document.getElementById('donationRequests');
-if(!el||!P.clan)return;
-const reqs=P.clan.donationRequests||[];
-el.innerHTML=reqs.length===0?'<div style="color:#6b7c8a;font-size:10px;text-align:center">No donation requests</div>':
-reqs.slice(0,5).map(r=>`<div style="display:flex;align-items:center;gap:8px;padding:6px;background:#1a2535;border-radius:6px;margin-bottom:4px"><div style="font-size:20px">${getCard(r.cardId)?.icon||'🃏'}</div><div style="flex:1"><div style="font-size:10px;font-weight:700">${r.requester} wants ${r.cardName}</div><div style="font-size:9px;color:#6b7c8a">${r.amount}/${r.max} donated</div></div>${r.requester!==P.name?`<button onclick="donateCard('${r.cardId}','${r.requester}')" style="padding:4px 8px;background:#27ae60;border:none;border-radius:4px;color:#fff;font-size:9px;cursor:pointer">Give</button>`:''}</div>`).join('');
+  const el=document.getElementById('donationRequests');
+  if(!el||!P.clan)return;
+  // Support both API format (donation_requests) and local format (donationRequests)
+  const reqs=P.clan.donation_requests||P.clan.donationRequests||[];
+  if(reqs.length===0){
+    el.innerHTML='<div style="color:#6b7c8a;font-size:10px;text-align:center">No donation requests</div>';
+    return;
+  }
+  el.innerHTML=reqs.slice(0,5).map(r=>{
+    // Support both formats: API uses requester_name/card_id, local uses requester/cardId
+    const requester=r.requester_name||r.requester||'Unknown';
+    const cardId=r.card_id||r.cardId;
+    const cardName=r.cardName||getCard(cardId)?.n||'Card';
+    const amount=r.amount||0;
+    const max=r.max||10;
+    const isMe=requester===P.name;
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px;background:#1a2535;border-radius:6px;margin-bottom:4px"><div style="font-size:20px">${getCard(cardId)?.icon||'🃏'}</div><div style="flex:1"><div style="font-size:10px;font-weight:700">${requester} wants ${cardName}</div><div style="font-size:9px;color:#6b7c8a">${amount}/${max} donated</div></div>${!isMe?`<button onclick="donateCard('${cardId}','${requester}')" style="padding:4px 8px;background:#27ae60;border:none;border-radius:4px;color:#fff;font-size:9px;cursor:pointer">Give</button>`:''}</div>`;
+  }).join('');
 }
-function donateCard(cardId,requester){
-if(!P.clan)return;
-const req=P.clan.donationRequests.find(r=>r.cardId===cardId&&r.requester===requester);
-if(!req||req.amount>=req.max)return;
-req.amount++;
-P.gold+=req.max===40?5:50;
-P.xp+=req.max===40?1:10;
-const me=P.clan.members.find(m=>m.name===P.name);
-if(me)me.donations++;
-save();updateDonations();updateCurrency();
+async function donateCard(cardId,requester){
+  if(!P.clan){showNotify('Not in a clan!','error');return;}
+  const reqs=P.clan.donation_requests||P.clan.donationRequests||[];
+  const req=reqs.find(r=>(r.card_id||r.cardId)===cardId&&(r.requester_name||r.requester)===requester);
+  if(!req){showNotify('Request not found!','error');return;}
+  if(req.amount>=(req.max||10)){showNotify('Request already filled!','info');return;}
+
+  // Check if we have the card to donate
+  const cardData=P.cards?.find(c=>c.id===cardId);
+  const cardShards=P.shards?.[cardId]||cardData?.shards||0;
+  if(cardShards<1){
+    showNotify('You don\'t have this card to donate!','error');
+    return;
+  }
+
+  if(NET.isOnline&&P.clan.id&&req.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/donate`,'POST',{request_id:req.id,amount:1});
+      if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+        return;
+      }
+      // Update local state
+      req.amount=(req.amount||0)+1;
+      P.gold+=(req.max===40)?5:50;
+      P.xp+=(req.max===40)?1:10;
+      const me=P.clan.members?.find(m=>m.name===P.name||m.player_id===NET.playerId);
+      if(me)me.donations=(me.donations||0)+1;
+      save();updateDonations();updateCurrency();
+      showNotify('🎁 Card Donated! +' + ((req.max===40)?5:50) + ' gold','success');
+    }catch(e){
+      console.error('Donate error:',e);
+      showNotify('Failed to donate: '+(e.message||'Network error'),'error');
+    }
+  }else{
+    // Offline/local fallback - just update locally
+    req.amount=(req.amount||0)+1;
+    P.gold+=(req.max===40)?5:50;
+    P.xp+=(req.max===40)?1:10;
+    // Deduct from our cards
+    if(P.shards&&P.shards[cardId])P.shards[cardId]=Math.max(0,P.shards[cardId]-1);
+    else if(cardData)cardData.shards=Math.max(0,(cardData.shards||0)-1);
+    const me=P.clan.members?.find(m=>m.name===P.name||m.player_id===NET.playerId);
+    if(me)me.donations=(me.donations||0)+1;
+    save();updateDonations();updateCurrency();
+    showNotify('🎁 Card Donated!','success');
+  }
 }
 function showMemberManagement(){
-if(!P.clan)return;
-const myRole=P.clan.members.find(m=>m.name===P.name)?.role||'Member';
-const canManage=myRole==='Leader'||myRole==='Co-Leader';
-let html='<div style="max-height:300px;overflow-y:auto">';
-P.clan.members.forEach(m=>{
-const roleIcon=m.role==='Leader'?'👑':m.role==='Co-Leader'?'⭐':m.role==='Elder'?'🛡️':'👤';
-html+=`<div style="display:flex;align-items:center;gap:8px;padding:8px;background:#1a2535;border-radius:6px;margin-bottom:4px"><div style="font-size:18px">${roleIcon}</div><div style="flex:1"><div style="font-weight:700;font-size:11px">${m.name}${m.name===P.name?' (You)':''}</div><div style="font-size:9px;color:#6b7c8a">${m.role} • 🏆${m.trophies}</div></div>`;
-if(canManage&&m.name!==P.name&&m.role!=='Leader'){
-html+=`<button onclick="promoteMember('${m.name}')" style="padding:3px 6px;background:#27ae60;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">⬆️</button><button onclick="demoteMember('${m.name}')" style="padding:3px 6px;background:#e67e22;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">⬇️</button><button onclick="kickMember('${m.name}')" style="padding:3px 6px;background:#e74c3c;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">❌</button>`;
+  if(!P.clan)return;
+  const members=P.clan.members||[];
+  const myMember=members.find(m=>m.name===P.name||m.player_id===NET.playerId);
+  const myRole=normalizeRole(myMember?.role);
+  const isLeader=myRole==='Leader';
+  const isCoLeader=myRole==='Co-Leader';
+  let html='<div style="max-height:300px;overflow-y:auto">';
+  members.forEach(m=>{
+    const role=normalizeRole(m.role);
+    const roleIcon=getRoleIcon(m.role);
+    const isMe=m.name===P.name||m.player_id===NET.playerId;
+    const trophies=m.trophies||0;
+    const memberId=m.player_id||m.name;
+    const targetIsLeader=role==='Leader';
+    const targetIsCoLeader=role==='Co-Leader';
+    html+=`<div style="display:flex;align-items:center;gap:8px;padding:8px;background:#1a2535;border-radius:6px;margin-bottom:4px"><div style="font-size:18px">${roleIcon}</div><div style="flex:1"><div style="font-weight:700;font-size:11px">${m.name}${isMe?' (You)':''}</div><div style="font-size:9px;color:#6b7c8a">${role} • 🏆${trophies}</div></div>`;
+    // Only leaders can promote/demote/kick, and only for non-leaders
+    if(isLeader&&!isMe&&!targetIsLeader){
+      html+=`<button onclick="promoteMember('${memberId}')" style="padding:3px 6px;background:#27ae60;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">⬆️</button><button onclick="demoteMember('${memberId}')" style="padding:3px 6px;background:#e67e22;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">⬇️</button><button onclick="kickMember('${memberId}')" style="padding:3px 6px;background:#e74c3c;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">❌</button>`;
+    }
+    // Co-leaders can only kick regular members
+    else if(isCoLeader&&!isMe&&!targetIsLeader&&!targetIsCoLeader){
+      html+=`<button onclick="kickMember('${memberId}')" style="padding:3px 6px;background:#e74c3c;border:none;border-radius:4px;color:#fff;font-size:8px;cursor:pointer">❌</button>`;
+    }
+    html+=`</div>`;
+  });
+  html+='</div>';
+  const modal=document.createElement('div');
+  modal.id='memberManagementModal';
+  modal.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:9999';
+  modal.innerHTML=`<div style="background:#243447;border-radius:12px;padding:15px;width:90%;max-width:350px"><div style="font-weight:800;font-size:14px;margin-bottom:10px;text-align:center">👥 Clan Members</div>${html}<button onclick="this.parentElement.parentElement.remove()" style="width:100%;padding:8px;background:#e74c3c;border:none;border-radius:8px;color:#fff;font-weight:800;cursor:pointer;margin-top:10px">Close</button></div>`;
+  // Remove existing modal if any
+  document.getElementById('memberManagementModal')?.remove();
+  document.body.appendChild(modal);
 }
-html+=`</div>`;
-});
-html+='</div>';
-const modal=document.createElement('div');
-modal.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:9999';
-modal.innerHTML=`<div style="background:#243447;border-radius:12px;padding:15px;width:90%;max-width:350px"><div style="font-weight:800;font-size:14px;margin-bottom:10px;text-align:center">👥 Clan Members</div>${html}<button onclick="this.parentElement.parentElement.remove()" style="width:100%;padding:8px;background:#e74c3c;border:none;border-radius:8px;color:#fff;font-weight:800;cursor:pointer;margin-top:10px">Close</button></div>`;
-document.body.appendChild(modal);
+
+async function promoteMember(playerId){
+  if(!P.clan)return;
+  const members=P.clan.members||[];
+  const m=members.find(x=>x.player_id===playerId||x.name===playerId);
+  if(!m)return;
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/promote`,'POST',{player_id:playerId});
+      if(result.clan){
+        P.clan=result.clan;
+        save();
+        document.getElementById('memberManagementModal')?.remove();
+        showMemberManagement();
+        showNotify('⬆️ Member Promoted!','success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to promote member','error');
+    }
+  }else{
+    // Offline fallback
+    const role=normalizeRole(m.role);
+    if(role==='Member')m.role='elder';
+    else if(role==='Elder')m.role='co-leader';
+    save();
+    document.getElementById('memberManagementModal')?.remove();
+    showMemberManagement();
+  }
 }
-function promoteMember(name){if(!P.clan)return;const m=P.clan.members.find(x=>x.name===name);if(!m)return;if(m.role==='Member')m.role='Elder';else if(m.role==='Elder')m.role='Co-Leader';save();showMemberManagement();}
-function demoteMember(name){if(!P.clan)return;const m=P.clan.members.find(x=>x.name===name);if(!m)return;if(m.role==='Co-Leader')m.role='Elder';else if(m.role==='Elder')m.role='Member';save();showMemberManagement();}
-function kickMember(name){if(!P.clan)return;P.clan.members=P.clan.members.filter(m=>m.name!==name);save();showMemberManagement();updateClan();}
+
+async function demoteMember(playerId){
+  if(!P.clan)return;
+  const members=P.clan.members||[];
+  const m=members.find(x=>x.player_id===playerId||x.name===playerId);
+  if(!m)return;
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/demote`,'POST',{player_id:playerId});
+      if(result.clan){
+        P.clan=result.clan;
+        save();
+        document.getElementById('memberManagementModal')?.remove();
+        showMemberManagement();
+        showNotify('⬇️ Member Demoted!','success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to demote member','error');
+    }
+  }else{
+    // Offline fallback
+    const role=normalizeRole(m.role);
+    if(role==='Co-Leader')m.role='elder';
+    else if(role==='Elder')m.role='member';
+    save();
+    document.getElementById('memberManagementModal')?.remove();
+    showMemberManagement();
+  }
+}
+
+async function kickMember(playerId){
+  if(!P.clan)return;
+  if(!confirm('Are you sure you want to kick this member?'))return;
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/kick`,'POST',{player_id:playerId});
+      if(result.clan){
+        P.clan=result.clan;
+        save();
+        document.getElementById('memberManagementModal')?.remove();
+        showMemberManagement();
+        updateClan();
+        showNotify('❌ Member Kicked!','success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to kick member','error');
+    }
+  }else{
+    // Offline fallback
+    P.clan.members=(P.clan.members||[]).filter(m=>m.player_id!==playerId&&m.name!==playerId);
+    save();
+    document.getElementById('memberManagementModal')?.remove();
+    showMemberManagement();
+    updateClan();
+  }
+}
 function challengeClanmate(){
 if(!P.clan)return;
 const bots=P.clan.members.filter(m=>m.isBot);
@@ -4096,7 +4480,8 @@ startBattle(true);
 function updateClanLevel(){
 const el=document.getElementById('clanLevel');
 if(!el||!P.clan)return;
-const totalTrophies=P.clan.members.reduce((a,m)=>a+m.trophies,0);
+const members=P.clan.members||[];
+const totalTrophies=members.reduce((a,m)=>a+(m.trophies||0),0);
 const level=Math.min(20,Math.floor(totalTrophies/10000)+1);
 const xpInLevel=totalTrophies%10000;
 el.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><div style="font-size:28px;background:linear-gradient(180deg,#ffd700,#ff8c00);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:900">${level}</div><div style="flex:1"><div style="font-size:10px;color:#6b7c8a">Clan Level</div><div style="height:8px;background:#1a2535;border-radius:4px;overflow:hidden;margin-top:4px"><div style="height:100%;width:${(xpInLevel/10000)*100}%;background:linear-gradient(90deg,#4ade80,#22c55e)"></div></div><div style="font-size:9px;color:#6b7c8a;margin-top:2px">${xpInLevel.toLocaleString()}/10,000 XP</div></div></div>`;
@@ -4117,39 +4502,172 @@ const c=P.clan.chest;
 el.innerHTML=`<div style="font-size:40px;margin-bottom:8px">📦</div><div style="font-size:12px;font-weight:800">Clan Chest</div><div style="height:12px;background:#1a2535;border-radius:6px;overflow:hidden;margin:8px 0"><div style="height:100%;width:${(c.crowns/c.maxCrowns)*100}%;background:linear-gradient(90deg,#3b82f6,#8b5cf6)"></div></div><div style="font-size:10px;color:#6b7c8a">👑 ${c.crowns}/${c.maxCrowns} Crowns</div>`;
 }
 function updateClanPerks(){
-const el=document.getElementById('clanPerks');
-if(!el||!P.clan)return;
-const totalTrophies=P.clan.members.reduce((a,m)=>a+m.trophies,0);
-const level=Math.min(20,Math.floor(totalTrophies/10000)+1);
-const perks=[{name:'Request Wait',icon:'⏱️',value:`${Math.max(1,8-Math.floor(level/3))}h`,desc:'Donation cooldown'},{name:'Request Cards',icon:'🃏',value:`+${level*2}`,desc:'Extra cards per request'},{name:'War Bonus',icon:'⚔️',value:`+${level*5}%`,desc:'War rewards boost'},{name:'Chest Speed',icon:'📦',value:`+${level*2}%`,desc:'Chest unlock speed'}];
-el.innerHTML=perks.map(p=>`<div style="background:#1a2535;border-radius:8px;padding:8px;text-align:center"><div style="font-size:18px">${p.icon}</div><div style="font-size:10px;font-weight:800;color:#4ade80">${p.value}</div><div style="font-size:8px;color:#6b7c8a">${p.name}</div></div>`).join('');
+  const el=document.getElementById('clanPerks');
+  if(!el||!P.clan)return;
+  const members=P.clan.members||[];
+  const totalTrophies=members.reduce((a,m)=>a+(m.trophies||0),0);
+  const level=Math.min(20,Math.floor(totalTrophies/10000)+1);
+  const perks=[{name:'Request Wait',icon:'⏱️',value:`${Math.max(1,8-Math.floor(level/3))}h`,desc:'Donation cooldown'},{name:'Request Cards',icon:'🃏',value:`+${level*2}`,desc:'Extra cards per request'},{name:'War Bonus',icon:'⚔️',value:`+${level*5}%`,desc:'War rewards boost'},{name:'Chest Speed',icon:'📦',value:`+${level*2}%`,desc:'Chest unlock speed'}];
+  el.innerHTML=perks.map(p=>`<div style="background:#1a2535;border-radius:8px;padding:8px;text-align:center"><div style="font-size:18px">${p.icon}</div><div style="font-size:10px;font-weight:800;color:#4ade80">${p.value}</div><div style="font-size:8px;color:#6b7c8a">${p.name}</div></div>`).join('');
 }
 function updateClanLeague(){
-const el=document.getElementById('clanLeague');
-if(!el||!P.clan)return;
-const leagues=[{name:'Bronze',icon:'🥉',min:0},{name:'Silver',icon:'🥈',min:1000},{name:'Gold',icon:'🥇',min:2500},{name:'Diamond',icon:'💎',min:5000},{name:'Legend',icon:'🏆',min:10000}];
-const current=leagues.filter(l=>P.clan.warTrophies>=l.min).pop();
-const next=leagues.find(l=>l.min>P.clan.warTrophies);
-el.innerHTML=`<div style="font-size:36px">${current.icon}</div><div style="font-size:14px;font-weight:900;margin:4px 0">${current.name} League</div><div style="font-size:10px;color:#6b7c8a">⚔️ ${P.clan.warTrophies} War Trophies</div>${next?`<div style="font-size:9px;color:#4ade80;margin-top:4px">${next.min-P.clan.warTrophies} more for ${next.name}</div>`:'<div style="font-size:9px;color:#ffd700;margin-top:4px">MAX LEAGUE!</div>'}`;
+  const el=document.getElementById('clanLeague');
+  if(!el||!P.clan)return;
+  // Support both API format (stats.war_trophies) and local format (warTrophies)
+  const warTrophies=P.clan.stats?.war_trophies||P.clan.warTrophies||0;
+  const leagues=[{name:'Bronze',icon:'🥉',min:0},{name:'Silver',icon:'🥈',min:1000},{name:'Gold',icon:'🥇',min:2500},{name:'Diamond',icon:'💎',min:5000},{name:'Legend',icon:'🏆',min:10000}];
+  const current=leagues.filter(l=>warTrophies>=l.min).pop()||leagues[0];
+  const next=leagues.find(l=>l.min>warTrophies);
+  el.innerHTML=`<div style="font-size:36px">${current.icon}</div><div style="font-size:14px;font-weight:900;margin:4px 0">${current.name} League</div><div style="font-size:10px;color:#6b7c8a">⚔️ ${warTrophies} War Trophies</div>${next?`<div style="font-size:9px;color:#4ade80;margin-top:4px">${next.min-warTrophies} more for ${next.name}</div>`:'<div style="font-size:9px;color:#ffd700;margin-top:4px">MAX LEAGUE!</div>'}`;
 }
 function updateClanMail(){
-const el=document.getElementById('clanMail');
-if(!el||!P.clan)return;
-if(!P.clan.mail)P.clan.mail=[{from:'System',subject:'Welcome!',msg:'Welcome to the clan! Participate in wars and donate cards to earn rewards.',time:Date.now()}];
-const m=P.clan.mail[0];
-el.innerHTML=`<div style="font-size:10px;font-weight:700;color:#ffd700">${m.subject}</div><div style="font-size:9px;color:#6b7c8a;margin:4px 0">From: ${m.from}</div><div style="font-size:10px">${m.msg}</div>`;
+  const el=document.getElementById('clanMail');
+  if(!el||!P.clan)return;
+  if(!P.clan.mail)P.clan.mail=[{from:'System',subject:'Welcome!',msg:'Welcome to the clan! Participate in wars and donate cards to earn rewards.',time:Date.now()}];
+  const m=P.clan.mail[0];
+  const members=P.clan.members||[];
+  const myMember=members.find(mem=>mem.name===P.name||mem.player_id===NET.playerId);
+  const myRole=normalizeRole(myMember?.role);
+  const isLeader=myRole==='Leader'||myRole==='Co-Leader';
+  el.innerHTML=`<div style="font-size:10px;font-weight:700;color:#ffd700">${m.subject}</div><div style="font-size:9px;color:#6b7c8a;margin:4px 0">From: ${m.from}</div><div style="font-size:10px">${m.msg}</div>${isLeader?`<button onclick="editClanMail()" style="margin-top:8px;padding:6px 10px;background:#3498db;border:none;border-radius:6px;color:#fff;font-size:9px;cursor:pointer">✏️ Edit Welcome</button>`:''}`;
+}
+
+async function editClanMail(){
+  if(!P.clan)return;
+  const subject=prompt('Enter welcome subject:',P.clan.mail?.[0]?.subject||'Welcome!');
+  if(subject===null)return;
+  const msg=prompt('Enter welcome message:',P.clan.mail?.[0]?.msg||'');
+  if(msg===null)return;
+
+  // Update local mail
+  if(!P.clan.mail)P.clan.mail=[];
+  P.clan.mail[0]={from:P.name,subject,msg,time:Date.now()};
+  save();
+  updateClanMail();
+  showNotify('📢 Welcome Message Updated!','success');
 }
 function updateClanSettings(){
-const el=document.getElementById('clanSettings');
-if(!el||!P.clan)return;
-const myRole=P.clan.members.find(m=>m.name===P.name)?.role||'Member';
-const isLeader=myRole==='Leader'||myRole==='Co-Leader';
-el.innerHTML=`<button onclick="editClanDescription()" style="padding:8px;background:#3498db;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer;${isLeader?'':'opacity:0.5'}">📝 Edit Description</button><button onclick="changeClanBadge()" style="padding:8px;background:#9b59b6;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer;${isLeader?'':'opacity:0.5'}">🛡️ Change Badge</button><button onclick="toggleClanType()" style="padding:8px;background:#e67e22;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer;${isLeader?'':'opacity:0.5'}">🔒 Toggle Open/Closed</button><button onclick="setClanMinTrophies()" style="padding:8px;background:#27ae60;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer;${isLeader?'':'opacity:0.5'}">🏆 Set Min Trophies</button>`;
+  const el=document.getElementById('clanSettings');
+  if(!el||!P.clan)return;
+  const members=P.clan.members||[];
+  const myMember=members.find(m=>m.name===P.name||m.player_id===NET.playerId);
+  const myRole=normalizeRole(myMember?.role);
+  const isLeader=myRole==='Leader';
+  const isCoLeader=myRole==='Co-Leader';
+  const canEdit=isLeader||isCoLeader;
+
+  // Only show settings to leaders and co-leaders
+  if(!canEdit){
+    el.innerHTML=`<div style="text-align:center;color:#6b7c8a;font-size:10px;padding:10px">Only clan leaders can edit settings</div>`;
+    return;
+  }
+
+  // Co-leaders can edit settings but not delete clan
+  el.innerHTML=`
+    <button onclick="editClanDescription()" style="padding:8px;background:#3498db;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer">📝 Edit Description</button>
+    <button onclick="changeClanBadge()" style="padding:8px;background:#9b59b6;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer">🛡️ Change Badge</button>
+    <button onclick="toggleClanType()" style="padding:8px;background:#e67e22;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer">🔒 Toggle Open/Closed</button>
+    <button onclick="setClanMinTrophies()" style="padding:8px;background:#27ae60;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer">🏆 Set Min Trophies</button>
+    ${isLeader?`<button onclick="deleteClan()" style="padding:8px;background:#e74c3c;border:none;border-radius:6px;color:#fff;font-size:10px;cursor:pointer">🗑️ Delete Clan</button>`:''}`;
 }
-function editClanDescription(){const desc=prompt('Enter clan description:',P.clan.description||'');if(desc!==null){P.clan.description=desc;save();showNotify('✏️ Description Updated!','success');}}
-function changeClanBadge(){const badges=['🛡️','⚔️','🏰','🐉','🦁','🦅','👑','💎','🔥','⭐'];const badge=badges[(badges.indexOf(P.clan.badge)+1)%badges.length];P.clan.badge=badge;save();updateClan();showNotify('🛡️ Badge Changed!\n'+badge,'success');}
-function toggleClanType(){P.clan.isOpen=!P.clan.isOpen;save();showNotify('🔒 Clan Updated!\n'+(P.clan.isOpen?'Open to All':'Invite Only'),'success');}
-function setClanMinTrophies(){const min=prompt('Minimum trophies to join:',P.clan.minTrophies||0);if(min!==null&&!isNaN(min)){P.clan.minTrophies=parseInt(min);save();showNotify('🏆 Min Trophies Set!\n'+P.clan.minTrophies+' trophies','success');}}
+async function editClanDescription(){
+  const desc=prompt('Enter clan description:',P.clan.description||'');
+  if(desc===null)return;
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/settings`,'POST',{description:desc});
+      if(result.clan){
+        P.clan=result.clan;
+        save();updateClan();
+        showNotify('✏️ Description Updated!','success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to update description','error');
+    }
+  }else{
+    P.clan.description=desc;
+    save();
+    showNotify('✏️ Description Updated!','success');
+  }
+}
+
+async function changeClanBadge(){
+  const badges=['🛡️','⚔️','🏰','🐉','🦁','🦅','👑','💎','🔥','⭐'];
+  const currentBadge=P.clan.badge||'🏰';
+  const newBadge=badges[(badges.indexOf(currentBadge)+1)%badges.length];
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/settings`,'POST',{badge:newBadge});
+      if(result.clan){
+        P.clan=result.clan;
+        save();updateClan();
+        showNotify('🛡️ Badge Changed!\n'+newBadge,'success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to change badge','error');
+    }
+  }else{
+    P.clan.badge=newBadge;
+    save();updateClan();
+    showNotify('🛡️ Badge Changed!\n'+newBadge,'success');
+  }
+}
+
+async function toggleClanType(){
+  const currentType=P.clan.type||'open';
+  const newType=currentType==='open'?'invite_only':'open';
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/settings`,'POST',{type:newType});
+      if(result.clan){
+        P.clan=result.clan;
+        save();updateClan();
+        showNotify('🔒 Clan Updated!\n'+(newType==='open'?'Open to All':'Invite Only'),'success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to update clan type','error');
+    }
+  }else{
+    P.clan.isOpen=!P.clan.isOpen;
+    save();
+    showNotify('🔒 Clan Updated!\n'+(P.clan.isOpen?'Open to All':'Invite Only'),'success');
+  }
+}
+
+async function setClanMinTrophies(){
+  const current=P.clan.required_trophies||P.clan.minTrophies||0;
+  const min=prompt('Minimum trophies to join:',current);
+  if(min===null||isNaN(min))return;
+  const trophies=parseInt(min);
+
+  if(NET.isOnline&&P.clan.id){
+    try{
+      const result=await NET.api(`/api/clan/${P.clan.id}/settings`,'POST',{required_trophies:trophies});
+      if(result.clan){
+        P.clan=result.clan;
+        save();updateClan();
+        showNotify('🏆 Min Trophies Set!\n'+trophies+' trophies','success');
+      }else if(result.error){
+        showNotify(`Error: ${result.error}`,'error');
+      }
+    }catch(e){
+      showNotify('Failed to set min trophies','error');
+    }
+  }else{
+    P.clan.minTrophies=trophies;
+    save();
+    showNotify('🏆 Min Trophies Set!\n'+trophies+' trophies','success');
+  }
+}
 
 // ===== ENHANCED PASS ROYALE =====
 const SEASON_THEMES=[
